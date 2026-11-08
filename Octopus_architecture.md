@@ -1,6 +1,6 @@
 # Octopus — Transparent Network Proxy
 
-**Author:** [Prabhat Hegde](https://github.com/phegde211)
+**Author:** [Prabhat Hegde](https://github.com/phegde211) (prabhat.hegde@gmail.com)
 
 **Private source repository:** [phegde211/octopus](https://github.com/phegde211/octopus)
 
