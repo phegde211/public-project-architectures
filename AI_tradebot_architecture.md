@@ -53,7 +53,7 @@ repo: github.com/phegde211/ai-tradebot-pro        (private)
 ```
 repo: github.com/phegde211/AI_tradebot            (private)
    branches:
-     main         2026-05-05   (obsolete — earlier TradingView/Playwright paper-trading bridge)
+     main         2026-05-05   (obsolete — earlier TradingView/Playwright bridge)
 ```
 
 Access to either is by request (contact above). This document describes
@@ -88,24 +88,19 @@ The launcher starts **four operating-system processes**. Each is a failure domai
 can crash and be restarted without corrupting the others.
 
 ```
-                             system control / status
-                        +------------------------------+
-                        |        CENTRAL_MANAGER        |   control-plane
-                        |   readiness · alarms · start  |   supervisor only
-                        +------------------------------+
-                            |                      |
-                   lifecycle|                      |lifecycle / health
-                            v                      v
-  +---------------+  raw market data   +----------------------+  display state  +---------------+
-  |     FEED      | -----------------> |        TRADER        | --------------> |   DASHBOARD   |
-  |  Dhan I/O     |                    |  ROT · strategies ·  |                 |   React UI    |
-  |  (one owner   | <----------------- |  analytics · risk ·  |                 |  (read-only)  |
-  |   of broker)  |  activation +      |  execution  (ONE     |                 +---------------+
-  +---------------+  held-contract      |  interpreter)       |                        |
-         ^           state              +----------------------+                        |
-         |                                        ^                                     |
-         |                                        +------------ user commands ----------+
-   Dhan sockets / REST                                        (explicit, operator-issued)
+                        system control / status
+                   +------------------------------+
+                   |        CENTRAL_MANAGER        |  supervisor — lifecycle,
+                   |   readiness · alarms · start  |  readiness & health of all
+                   +------------------------------+
+                                  |  (supervises all three)
+                                  v
+  +-------------+   market data    +----------------+   display    +-------------+
+  |    FEED     | ---------------> |     TRADER     | -----------> |  DASHBOARD  |
+  |  Dhan I/O   | <--------------- | ROT·strategies | <----------- |  React UI   |
+  | one broker  |  activation +    | analytics·risk |  user cmds   | (read-only) |
+  |   owner     |  held state      | execution(ONE) |              +-------------+
+  +-------------+                  +----------------+
 ```
 
 | Process | Owns | Never does |
@@ -189,7 +184,7 @@ ai-tradebot-pro/
   ml_engine/                offline-trained admission model + inference boundary (9)
     inference.py               single production model loader
     models/                    promoted model + per-stock calibrated thresholds
-  trade_engine/             PositionService: admission, sizing, risk, lifecycle, execution (48)
+  trade_engine/             PositionService: admission, sizing, risk, execution (48)
   replay_engine/            deterministic event-time replay + diagnostics (17)
   log_engine/               decision audit trail, JSONL ledgers, daily summaries (11)
   dashboard_engine/         React / TypeScript frontend (Vite, MUI, Lightweight Charts)
@@ -198,7 +193,7 @@ ai-tradebot-pro/
   research/                 offline backtesting, dataset builds, model training (79)
   scripts/                  start.sh / stop.sh, training & calibration entry points (13)
   post_mkt_analysis/        end-of-day bhavcopy -> next-day shortlist tooling
-  architecture.md           the private canonical architecture (this document derives from it)
+  architecture.md           the canonical architecture (this doc derives from it)
   requirements.txt   pytest.ini   redesign.md   replay.md   testing.md
 ```
 
@@ -503,9 +498,9 @@ event to a **keyed dispatcher** (`services/keyed_dispatcher.py`):
 
 ```
    feed socket --> receive thread --> keyed dispatcher
-                                         |-- key=SYM_A --> [ ordered ] --\
-                                         |-- key=SYM_B --> [ ordered ]    >  run concurrently
-                                         |-- key=SYM_C --> [ ordered ] --/
+                        |-- key=SYM_A --> [ ordered ] --\
+                        |-- key=SYM_B --> [ ordered ]    >  run concurrently
+                        |-- key=SYM_C --> [ ordered ] --/
 ```
 
 Per-symbol events run in arrival order; different symbols run concurrently; there is **no
