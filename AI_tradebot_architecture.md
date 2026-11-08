@@ -21,9 +21,9 @@ place it falls short of a well-funded desk is **access to deep historical and al
 market data** — a data-access gap, not an engineering one.
 
 Its defining *engineering* property is **modularity**: a strategy-agnostic spine into
-which trading strategies plug as interchangeable components (Section 8). Its proprietary *core*
+which trading strategies plug as interchangeable components (Section 9). Its proprietary *core*
 is the two strategies that plug into it — **ACOS** (Adaptive Cumulative Option Strategy)
-and **PAF** (Price Action Follow-up) — the distillation of 20+ years of trading (Section 9).
+and **PAF** (Price Action Follow-up) — the distillation of 20+ years of trading (Section 10).
 
 > **What is withheld.** Only the **proprietary strategy decision rules** — what ACOS and
 > PAF actually test for (decision-tree branches, entry/exit criteria, strike selection,
@@ -68,13 +68,13 @@ Access to either is by request (contact above). This document describes
 | Language / runtime | **Python 3.12**, OS processes, worker threads | Failure-domain isolation; one interpreter for coupled stages. |
 | Inter-process bus | **ZeroMQ** (`pyzmq`) + **MessagePack** (`msgpack`) | Topic-based pub/sub with compact binary envelopes. |
 | In-process bus | Custom `FeedBus` publish/subscribe | Connect TRADER stages with no network hop. |
-| Ordered concurrency | Keyed dispatcher over a worker-thread pool | Per-symbol ordering, cross-symbol parallelism (Section 10). |
+| Ordered concurrency | Keyed dispatcher over a worker-thread pool | Per-symbol ordering, cross-symbol parallelism (Section 11). |
 | Broker / market data | **Dhan** SDK (`dhanhq`), **WebSocket** feed (`websockets`, pinned), REST; **`pyotp`** (TOTP) | Ticks, candles, option chains, instruments, orders, reconciliation. |
 | Numerics | **NumPy**, **pandas** | Time-series handling, feature prep, offline profile builds. |
 | Options / indicators | **`py_vollib`** (Greeks/IV), **TA-Lib** (C-backed), **`ta`** | Derivatives math and technical indicators behind the (private) analytics. |
 | Machine learning | **XGBoost**, **scikit-learn** | Gradient-boosted admission model from local artifacts; trained offline. |
 | Columnar data | **Apache Parquet** via **PyArrow** | Per-stock history and deterministic profile artifacts. |
-| Durable state | **SQLite** snapshots + append-only **JSONL** ledgers | Recovery independent of transport (Section 11). |
+| Durable state | **SQLite** snapshots + append-only **JSONL** ledgers | Recovery independent of transport (Section 12). |
 | Web backend | **FastAPI** + **Uvicorn** (+ Jinja2) | Dashboard API and streaming endpoints. |
 | Frontend | **React 19**, **TypeScript**, **Vite**, **Material UI** (+ MUI X DataGrid), **Lightweight Charts**, Emotion | Typed operator UI, operational tables, streaming charts. |
 | Frontend transport | **WebSockets** | Push changing state without full-page refreshes. |
@@ -160,11 +160,58 @@ Only **FEED** and **TRADER** sit on the market-to-order path.
 
 ---
 
-## 3. Why four isolated processes — and how dependencies are resolved
+## 3. Repository layout (`redesign-4`)
+
+The code is organized as a set of single-responsibility **engine packages** behind the
+four process entry points. The engine packages are the modular seams of Section 9; the
+`strategy_engine` internals are the proprietary core (Section 10) and are deliberately
+not enumerated here.
+
+```
+ai-tradebot-pro/
+  services/                 process entry points + the orchestrator graph
+    trader_process.py          TRADER: drains feed events, runs the graph
+    feed_gateway_process.py    FEED: broker auth + all Dhan I/O
+    dashboard_process.py       DASHBOARD: FastAPI + streaming state
+    orchestrator_graph.py      builds the ONE graph used by runtime AND replay
+    keyed_dispatcher.py        per-symbol-ordered, cross-symbol-parallel dispatch
+    trader_state.py            periodic snapshots, reconciliation, stale-mark alarms
+  core_engine/              transport + in-process bus (19 modules)
+    zmq_bus.py                 the four ZMQ streams (feed_raw / trader_events / …)
+  feed_engine/              market-data normalization, forming bars, subscriptions (25)
+  stock_profiling/          ROT scout + offline per-stock profiles (40)
+    rot_service.py             two-ring scout + the shared candidate board
+    intrabar_intelligence.py   forming-bar + stock-relative references
+    lookup.py                  sole cached runtime profile-lookup API
+    profiles/                  built Parquet/JSON profile artifacts
+    candles_5m/                210 per-stock, one-year, 5-min Parquet files
+  strategy_engine/          ACOS and PAF strategies   (PROPRIETARY — not enumerated)
+  ml_engine/                offline-trained admission model + inference boundary (9)
+    inference.py               single production model loader
+    models/                    promoted model + per-stock calibrated thresholds
+  trade_engine/             PositionService: admission, sizing, risk, lifecycle, execution (48)
+  replay_engine/            deterministic event-time replay + diagnostics (17)
+  log_engine/               decision audit trail, JSONL ledgers, daily summaries (11)
+  dashboard_engine/         React / TypeScript frontend (Vite, MUI, Lightweight Charts)
+  visualization_engine/     offline charting / analysis views (8)
+  config_engine/            configuration surface (3)
+  research/                 offline backtesting, dataset builds, model training (79)
+  scripts/                  start.sh / stop.sh, training & calibration entry points (13)
+  post_mkt_analysis/        end-of-day bhavcopy -> next-day shortlist tooling
+  architecture.md           the private canonical architecture (this document derives from it)
+  requirements.txt   pytest.ini   redesign.md   replay.md   testing.md
+```
+
+Numbers in parentheses are the module (`.py`) counts in that package at `redesign-4` —
+an indication of weight, not an invitation to read the strategy internals.
+
+---
+
+## 4. Why four isolated processes — and how dependencies are resolved
 
 **The processes exchange information only through a typed message bus — never shared
 memory, never a direct function call.** Four ZeroMQ pub/sub streams are the *entire*
-inter-process surface (Section 4). Why:
+inter-process surface (Section 5). Why:
 
 - **Failure isolation.** The broker connection (FEED) is the least predictable part of
   the system — sockets drop, REST calls stall, tokens expire. Isolating it means a feed
@@ -174,7 +221,7 @@ inter-process surface (Section 4). Why:
   DASH's. No process reaches into another's memory, so there is no shared-state
   corruption and every fact has one authoritative source.
 - **The bus is not a database.** Messages are live state in flight, never replayed to
-  rebuild state; recovery is from authoritative stores (Section 11).
+  rebuild state; recovery is from authoritative stores (Section 12).
 
 **Dependency resolution without direct calls.** The hard case is a real cross-process
 dependency: TRADER needs option-chain data that only FEED can fetch. It is resolved as a
@@ -196,11 +243,11 @@ the dependency is satisfied asynchronously when the data arrives as ordinary fee
 **Inside TRADER it is the opposite choice:** the tightly-coupled stages share ordering and
 state, so they run in **one interpreter on a single in-process `FeedBus`** — no network
 hop, no serialization. The rule: *processes and the network exist only at failure-domain
-boundaries; everything else is in-process* (Section 17).
+boundaries; everything else is in-process* (Section 18).
 
 ---
 
-## 4. Transport surface & schema
+## 5. Transport surface & schema
 
 Four ZeroMQ streams (`core_engine/zmq_bus.py`) are the only use of the network — all
 publish/subscribe with **MessagePack** envelopes, so a slow subscriber never blocks a
@@ -219,12 +266,12 @@ filtering. Historical/profile data uses a columnar **Parquet** schema with a fix
 
 ---
 
-## 5. FEED — market-data ownership
+## 6. FEED — market-data ownership
 
 `services/feed_gateway_process.py` owns broker authentication and all Dhan I/O. It
 subscribes to the F&O spot universe, publishes spot packets (`tick.<SYM>`) and completed
 1- and 5-minute candles, maintains **dynamic** option subscriptions (activated on demand,
-Section 3), hydrates bounded option history, retains subscriptions and marks for held contracts,
+Section 4), hydrates bounded option history, retains subscriptions and marks for held contracts,
 restores completed intraday spot history after a restart, and reports feed freshness. It
 computes no Greeks, no ROT classification, no strategy, no risk and no positions.
 
@@ -237,10 +284,10 @@ restart, and duplicate / out-of-order packets.
 
 ---
 
-## 6. TRADER — the canonical pipeline
+## 7. TRADER — the canonical pipeline
 
 `services/trader_process.py` drains FEED events into a single graph built by
-`services/orchestrator_graph.py`. **Runtime and replay use the same builder** (Section 12,
+`services/orchestrator_graph.py`. **Runtime and replay use the same builder** (Section 13,
 invariant 13).
 
 ```
@@ -259,7 +306,7 @@ invariant 13).
 
 ---
 
-## 7. ROT — two rings that tame an option-data explosion
+## 8. ROT — two rings that tame an option-data explosion
 
 `stock_profiling/rot_service.py`. **ROT is a scout, not a strategy** — it never emits a
 trade. It exists to solve one problem of *scale*: the information burst you would face if
@@ -316,7 +363,7 @@ streams, *no option data at all*. ROT runs entirely here, in two passes:
 
 ### Ring 2 — the option chain (expensive, selective)
 
-Only for a name that clears Ring 1 (and that a strategy then identifies, Section 3) does the
+Only for a name that clears Ring 1 (and that a strategy then identifies, Section 4) does the
 system **activate that name's option chain** and begin computing Greeks and analytics:
 
 ```
@@ -370,7 +417,7 @@ promotion/expiry times and a sequence number.
 
 ---
 
-## 8. Modularity — strategies are plug-ins (the engineering MVP)
+## 9. Modularity — strategies are plug-ins (the engineering MVP)
 
 The defining *engineering* property of the architecture is **modularity: the strategy
 layer is fully pluggable.** Everything around a strategy — FEED, the ROT scout, the
@@ -412,13 +459,13 @@ what makes this a strategy *platform*, not one hard-coded bot.
 
 ---
 
-## 9. The two strategies — 20 years of trading, distilled (the proprietary core)
+## 10. The two strategies — 20 years of trading, distilled (the proprietary core)
 
 Everything above is the *platform*. This section is the *edge*. **ACOS** (Adaptive
 Cumulative Option Strategy) and **PAF** (Price Action Follow-up) are the distillation of
 **20+ years of the author's hands-on market experience, codified into two strategies.**
 They are the single most valuable — and most proprietary — part of the system. The modular
-spine (Section 8) exists precisely so this hard-won logic can be expressed, protected, tested and
+spine (Section 9) exists precisely so this hard-won logic can be expressed, protected, tested and
 evolved as clean plug-ins instead of being tangled through the engine; the platform serves
 the strategies, not the other way round.
 
@@ -432,7 +479,7 @@ ordering are shown; the criteria, branches and thresholds inside each stage are 
                  -> curated candlestick-pattern checks
                  -> phase-aware admission rules
                  -> two-phase: identify the stock, then activate the option
-                    chain (Ring 2, Section 7) and select the strike
+                    chain (Ring 2, Section 8) and select the strike
           PAF  : a price-action follow-up state machine over 5-min structure
                  and 1-min triggers
      -> ML ADMISSION GATE   (XGBoost; per-stock calibrated; can veto, never originates)
@@ -449,7 +496,7 @@ each stage *tests for* is the proprietary edge and is not described here.
 
 ---
 
-## 10. Concurrency & ordering
+## 11. Concurrency & ordering
 
 The receive thread does **no** strategy computation — it drains the socket and hands each
 event to a **keyed dispatcher** (`services/keyed_dispatcher.py`):
@@ -467,9 +514,9 @@ and the socket keeps draining while work runs, so one slow symbol never backs up
 
 ---
 
-## 11. State, restart & execution integrity
+## 12. State, restart & execution integrity
 
-Recovery rests on one rule (Section 3): **transport is never the source of truth.** After any
+Recovery rests on one rule (Section 4): **transport is never the source of truth.** After any
 restart — including mid-session — state is rebuilt from authoritative stores:
 
 | Authoritative source | Restores |
@@ -491,7 +538,7 @@ contract shared by paper and live**.
 
 ---
 
-## 12. Deterministic replay
+## 13. Deterministic replay
 
 **Runtime and replay construct the same orchestrator graph.** A recorded session is fed
 through the identical pipeline live consumers use, on an **event-time** clock with explicit
@@ -502,7 +549,7 @@ an engineering artifact, never on its own a profitability claim.
 
 ---
 
-## 13. Offline intelligence & the ML boundary
+## 14. Offline intelligence & the ML boundary
 
 Per-stock behavioural profiles and the admission model are produced **entirely offline** and
 consumed on the live path through a deterministic lookup boundary; **training and profile
@@ -522,7 +569,7 @@ Feature definitions, counts and thresholds are private.
 
 ---
 
-## 14. Dashboard boundary
+## 15. Dashboard boundary
 
 `services/dashboard_process.py` (FastAPI backend, React/TypeScript frontend over WebSockets)
 renders the outer universe and profile coverage, active inner-ring candidates, price/volume
@@ -534,7 +581,7 @@ the truth.
 
 ---
 
-## 15. Reviewed scale
+## 16. Reviewed scale
 
 `redesign-4` snapshot — figures identify reviewed artifacts, not throughput or profitability:
 
@@ -550,7 +597,7 @@ the truth.
 
 ---
 
-## 16. Architectural invariants
+## 17. Architectural invariants
 
 1. A trading fact has one owner; everything else observes.
 2. Internal TRADER stages stay in one interpreter, on the in-process `FeedBus`.
@@ -568,7 +615,7 @@ the truth.
 
 ---
 
-## 17. Design evolution — why this shape
+## 18. Design evolution — why this shape
 
 The four-process design is a deliberate consolidation. An earlier version was **sharded across
 many processes** — separate analytics/strategy shards, separate portfolio and execution
@@ -577,11 +624,11 @@ much: every stage boundary became a serialization point, a recovery problem, an 
 and another thing to monitor, all to parallelize work that was never the bottleneck. It was
 retired in favour of the rule used throughout — **processes and the network exist only at
 failure-domain boundaries** — with the decision domain pulled back into one interpreter where a
-keyed dispatcher (Section 10) recovers all the useful concurrency without any cross-process handoff. The
+keyed dispatcher (Section 11) recovers all the useful concurrency without any cross-process handoff. The
 payoffs are visible throughout: recovery reads authoritative state instead of draining spools
-(Section 11); ordering is a local guarantee, not a distributed protocol (Section 10); stage-to-stage handoff is
-an in-process condition variable, not a networked queue (Section 7); and the whole pipeline reconstructs
-deterministically for replay because it is one graph in one place (Section 12).
+(Section 12); ordering is a local guarantee, not a distributed protocol (Section 11); stage-to-stage handoff is
+an in-process condition variable, not a networked queue (Section 8); and the whole pipeline reconstructs
+deterministically for replay because it is one graph in one place (Section 13).
 
 ---
 
