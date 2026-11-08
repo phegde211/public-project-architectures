@@ -1,11 +1,11 @@
 # AI Tradebot Pro — Architecture
 
-**Author:** [Prabhat Hegde](https://github.com/phegde211)
+**Author:** [Prabhat Hegde](https://github.com/phegde211)   (prabhat.hegde)
 
 **Private source repository:** [phegde211/ai-tradebot-pro](https://github.com/phegde211/ai-tradebot-pro)
 
 The source repository is private. Please contact the author, Prabhat Hegde
-([prabhat.hegde@gmail.com](mailto:prabhat.hegde@gmail.com)), to purchase or associate.
+([prabhat.hegde@gmail.com](mailto:prabhat.hegde@gmail.com)), to purchase or association.
 
 AI Tradebot Pro is an **event-driven intraday options-trading platform** for the
 Indian F&O (futures & options) market. This document describes the **build
