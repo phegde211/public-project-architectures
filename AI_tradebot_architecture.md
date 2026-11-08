@@ -14,6 +14,12 @@ two-ring scouting design and the data-scale problem it solves, the decision work
 the concurrency and recovery model, the technology stack and the scale — derived from
 the reviewed `redesign-4` branch (§0).
 
+**Proven live.** The platform has been run in live markets against the **Dhan** broker
+with real capital and has produced real profits. In technology stack and architecture it
+is equivalent to a professional proprietary-trading desk and scales like one; the one
+place it falls short of a well-funded desk is **access to deep historical and alternative
+market data** — a data-access gap, not an engineering one.
+
 Its defining *engineering* property is **modularity**: a strategy-agnostic spine into
 which trading strategies plug as interchangeable components (§8). Its proprietary *core*
 is the two strategies that plug into it — **ACOS** (Adaptive Cumulative Option Strategy)
@@ -55,7 +61,28 @@ Access to either is by request (contact above). This document describes
 
 ---
 
-## 1. System architecture at a glance
+## 1. Technology stack
+
+| Layer | Technology | Role |
+|---|---|---|
+| Language / runtime | **Python 3.12**, OS processes, worker threads | Failure-domain isolation; one interpreter for coupled stages. |
+| Inter-process bus | **ZeroMQ** (`pyzmq`) + **MessagePack** (`msgpack`) | Topic-based pub/sub with compact binary envelopes. |
+| In-process bus | Custom `FeedBus` publish/subscribe | Connect TRADER stages with no network hop. |
+| Ordered concurrency | Keyed dispatcher over a worker-thread pool | Per-symbol ordering, cross-symbol parallelism (§10). |
+| Broker / market data | **Dhan** SDK (`dhanhq`), **WebSocket** feed (`websockets`, pinned), REST; **`pyotp`** (TOTP) | Ticks, candles, option chains, instruments, orders, reconciliation. |
+| Numerics | **NumPy**, **pandas** | Time-series handling, feature prep, offline profile builds. |
+| Options / indicators | **`py_vollib`** (Greeks/IV), **TA-Lib** (C-backed), **`ta`** | Derivatives math and technical indicators behind the (private) analytics. |
+| Machine learning | **XGBoost**, **scikit-learn** | Gradient-boosted admission model from local artifacts; trained offline. |
+| Columnar data | **Apache Parquet** via **PyArrow** | Per-stock history and deterministic profile artifacts. |
+| Durable state | **SQLite** snapshots + append-only **JSONL** ledgers | Recovery independent of transport (§11). |
+| Web backend | **FastAPI** + **Uvicorn** (+ Jinja2) | Dashboard API and streaming endpoints. |
+| Frontend | **React 19**, **TypeScript**, **Vite**, **Material UI** (+ MUI X DataGrid), **Lightweight Charts**, Emotion | Typed operator UI, operational tables, streaming charts. |
+| Frontend transport | **WebSockets** | Push changing state without full-page refreshes. |
+| Verification | **pytest**, replay-regression harness, **ESLint** + Vite build | Data contracts, ordering, recovery, lifecycle, presentation. |
+
+---
+
+## 2. System architecture at a glance
 
 The launcher starts **four operating-system processes**. Each is a failure domain: it
 can crash and be restarted without corrupting the others.
@@ -133,11 +160,11 @@ Only **FEED** and **TRADER** sit on the market-to-order path.
 
 ---
 
-## 2. Why four isolated processes — and how dependencies are resolved
+## 3. Why four isolated processes — and how dependencies are resolved
 
 **The processes exchange information only through a typed message bus — never shared
 memory, never a direct function call.** Four ZeroMQ pub/sub streams are the *entire*
-inter-process surface (§3). Why:
+inter-process surface (§4). Why:
 
 - **Failure isolation.** The broker connection (FEED) is the least predictable part of
   the system — sockets drop, REST calls stall, tokens expire. Isolating it means a feed
@@ -173,7 +200,7 @@ boundaries; everything else is in-process* (§17).
 
 ---
 
-## 3. Transport surface & schema
+## 4. Transport surface & schema
 
 Four ZeroMQ streams (`core_engine/zmq_bus.py`) are the only use of the network — all
 publish/subscribe with **MessagePack** envelopes, so a slow subscriber never blocks a
@@ -192,33 +219,12 @@ filtering. Historical/profile data uses a columnar **Parquet** schema with a fix
 
 ---
 
-## 4. Technology stack
-
-| Layer | Technology | Role |
-|---|---|---|
-| Language / runtime | **Python 3.12**, OS processes, worker threads | Failure-domain isolation; one interpreter for coupled stages. |
-| Inter-process bus | **ZeroMQ** (`pyzmq`) + **MessagePack** (`msgpack`) | Topic-based pub/sub with compact binary envelopes. |
-| In-process bus | Custom `FeedBus` publish/subscribe | Connect TRADER stages with no network hop. |
-| Ordered concurrency | Keyed dispatcher over a worker-thread pool | Per-symbol ordering, cross-symbol parallelism (§10). |
-| Broker / market data | **Dhan** SDK (`dhanhq`), **WebSocket** feed (`websockets`, pinned), REST; **`pyotp`** (TOTP) | Ticks, candles, option chains, instruments, orders, reconciliation. |
-| Numerics | **NumPy**, **pandas** | Time-series handling, feature prep, offline profile builds. |
-| Options / indicators | **`py_vollib`** (Greeks/IV), **TA-Lib** (C-backed), **`ta`** | Derivatives math and technical indicators behind the (private) analytics. |
-| Machine learning | **XGBoost**, **scikit-learn** | Gradient-boosted admission model from local artifacts; trained offline. |
-| Columnar data | **Apache Parquet** via **PyArrow** | Per-stock history and deterministic profile artifacts. |
-| Durable state | **SQLite** snapshots + append-only **JSONL** ledgers | Recovery independent of transport (§11). |
-| Web backend | **FastAPI** + **Uvicorn** (+ Jinja2) | Dashboard API and streaming endpoints. |
-| Frontend | **React 19**, **TypeScript**, **Vite**, **Material UI** (+ MUI X DataGrid), **Lightweight Charts**, Emotion | Typed operator UI, operational tables, streaming charts. |
-| Frontend transport | **WebSockets** | Push changing state without full-page refreshes. |
-| Verification | **pytest**, replay-regression harness, **ESLint** + Vite build | Data contracts, ordering, recovery, lifecycle, presentation. |
-
----
-
 ## 5. FEED — market-data ownership
 
 `services/feed_gateway_process.py` owns broker authentication and all Dhan I/O. It
 subscribes to the F&O spot universe, publishes spot packets (`tick.<SYM>`) and completed
 1- and 5-minute candles, maintains **dynamic** option subscriptions (activated on demand,
-§2), hydrates bounded option history, retains subscriptions and marks for held contracts,
+§3), hydrates bounded option history, retains subscriptions and marks for held contracts,
 restores completed intraday spot history after a restart, and reports feed freshness. It
 computes no Greeks, no ROT classification, no strategy, no risk and no positions.
 
@@ -310,7 +316,7 @@ streams, *no option data at all*. ROT runs entirely here, in two passes:
 
 ### Ring 2 — the option chain (expensive, selective)
 
-Only for a name that clears Ring 1 (and that a strategy then identifies, §2) does the
+Only for a name that clears Ring 1 (and that a strategy then identifies, §3) does the
 system **activate that name's option chain** and begin computing Greeks and analytics:
 
 ```
@@ -463,7 +469,7 @@ and the socket keeps draining while work runs, so one slow symbol never backs up
 
 ## 11. State, restart & execution integrity
 
-Recovery rests on one rule (§2): **transport is never the source of truth.** After any
+Recovery rests on one rule (§3): **transport is never the source of truth.** After any
 restart — including mid-session — state is rebuilt from authoritative stores:
 
 | Authoritative source | Restores |
