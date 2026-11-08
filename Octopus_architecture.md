@@ -16,7 +16,7 @@ It accepts mutual-TLS (mTLS) connections from clients, opens its own mTLS
 connection to an upstream server, and shuttles traffic between the two. Because
 it terminates TLS on *both* sides, it sits on the **plaintext** path and can
 inspect or transform traffic (the "brain") and record per-connection state in an
-in-memory hash table (the **GST**). Each concurrent connection is a "tentacle".
+in-memory hash table (the **any generic hash**). Each concurrent connection is a "tentacle".
 
 The same binary can also run as a **replay/relay server** (`OCTO_ECHO_SERVER=1`):
 it terminates the client TLS and echoes the decrypted bytes straight back instead
@@ -36,14 +36,14 @@ the debugging history of the non-blocking rework and known issues see
     octo.c             core engine: socket contexts, epoll loop, worker pool,
                        async handshake state machine, data path, cert reload
     networking.c       sockets, epoll helpers, non-blocking connect, OpenSSL wrappers
-    gst.c              the GST hash table (generic key -> value store)
+    <hash>.c           hash table (generic key -> value store)
     timer.c            generic timer infrastructure (stats printer)
     octo_stats.c       counters + periodic stats printing
     logging.c          timestamped stdout logging
     start_octo.c       main(): reads OCTO_* env and starts the service
   include/             all headers
     octo.h             core structs (socket_context, data node, global ctx), enums
-    networking.h  gst.h  gst_handler.h  logging.h  octo_stats.h  timer.h
+    networking.h  hash.h  hash_handler.h  logging.h  octo_stats.h  timer.h
   obj/                 build objects (generated, git-ignored)
   Makefile             `make`, `make asan`, `make clean`
   tests/               test client + cert generation + run scripts + guide
@@ -73,7 +73,7 @@ All local `#include`s are unqualified (`"octo.h"`); the compiler finds them via
                                    |       |  \               /  |              |
                                    |    inQ|   v             v   |inQ           |
                                    |   outQ|  +-----------------+ |outQ          |
-                                   |       |  |  GST hash table | |             |
+                                   |       |  |  hash table | |             |
                                    |       |  | (bookkeeping;   | |             |
                                    |       |  |  inert today)   | |             |
                                    |       |  +-----------------+ |             |
@@ -254,7 +254,7 @@ Special cases handled by `octo_client_setup_backend`:
 - **echo/replay** (`OCTO_ECHO_SERVER=1`): no backend; after the frontend handshake
   the client is armed for read and echoes on the same socket.
 - **remote/peer** clients (`OCTO_PEER_LISTEN_PORT`): the backend to the local
-  server is created lazily on GST lookup, not here.
+  server is created lazily on hash lookup, not here.
 
 ---
 
@@ -275,7 +275,7 @@ Two different queue kinds, easy to conflate:
 ```
 
 ```
-        SSL_read                    route (GST hook, framing)               SSL_write
+        SSL_read                    route (hash lookup hook, framing)               SSL_write
   wire ---------> [ ctx.inQ ] ---> octo_process_incoming_data ---> [ dest.outQ ] ---------> wire
                   (reassembly)          (per node)                  (backpressure)
 ```
@@ -300,7 +300,7 @@ accumulated (`tlv_len`, `tlv_len_bytes`), `app_data`/`app_data_len`/
       octo_enqueue_incoming_data(client)    [length-prefixed reassembly -> inQ]
       octo_process_incoming_data(client)
         for each COMPLETE node (app_data_complete):
-          [GST hook: no-op today]
+          [hash table hook: no-op today]
           strip META_DATA_LEN prefix, move node -> backend.outQ
           backend owned by X -> octo_write_handler(backend) -> SSL_write
 ```
@@ -445,11 +445,11 @@ pick up the new certs.
 
 ---
 
-## 12. GST hash table & timers
+## 12. hash table & timers
 
-`gst.c` is a real hash table (FNV-1a keys, per-table mutex, chained buckets). It
+`generic_hash.c` is a real hash table (FNV-1a keys, per-table mutex, chained buckets). It
 sits on the data path so future features can record per-connection information
-extracted from a payload; the interpretation hooks in `gst_handler.h` are the
+extracted from a payload; the interpretation hooks in `hash_handler.h` are the
 seams. With no payload to interpret today the hooks are no-ops and the table stays
 empty. `timer.c` is generic timer plumbing; the only current caller is the
 optional periodic stats printer. Neither is involved in connection cleanup.
@@ -526,7 +526,7 @@ both the normal and ASAN builds, plus stress (64 MiB×1, 16 MiB×64, 32 MiB×32,
 out.
 
 Note on scope: this decoupled reply model is correct for the **bridged 1:1 proxy**
-(one outstanding request/reply stream per connection). The remote-octo / GST
+(one outstanding request/reply stream per connection). The remote-octo / hash table
 (`rm_backend_ctx`, N:1) path still correlates replies to requests via the retained
 `sent` node — it is a separate branch, keyed off `linked_sock_ctx == NULL`, and is
 left unchanged.
