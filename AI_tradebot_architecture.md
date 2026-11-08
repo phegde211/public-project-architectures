@@ -4,24 +4,54 @@
 
 **Private source repository:** [phegde211/ai-tradebot-pro](https://github.com/phegde211/ai-tradebot-pro)
 
-The source repository is private. Please contact the author, Prabhat Hegde,
-to request permission and access to the implementation.
+The source repository is private. Please contact the author, Prabhat Hegde
+([prabhat.hegde@gmail.com](mailto:prabhat.hegde@gmail.com)), to purchase or associate.
 
 AI Tradebot Pro is an **event-driven intraday options-trading platform** for the
 Indian F&O (futures & options) market. This document describes the **build
 architecture** in full — the processes and how their dependencies are resolved, the
 two-ring scouting design and the data-scale problem it solves, the decision workflow,
 the concurrency and recovery model, the technology stack and the scale — derived from
-the reviewed `redesign-4` branch (last committed 15 Aug 2026).
+the reviewed `redesign-4` branch (§0).
 
-Its defining property is **modularity**: a strategy-agnostic spine into which trading
-strategies plug as interchangeable components (§8). The two shipped strategies, **ACOS**
-and **PAF**, are simply two plug-ins.
+Its defining *engineering* property is **modularity**: a strategy-agnostic spine into
+which trading strategies plug as interchangeable components (§8). Its proprietary *core*
+is the two strategies that plug into it — **ACOS** (Adaptive Cumulative Option Strategy)
+and **PAF** (Price Action Follow-up) — the distillation of 20+ years of trading (§9).
 
 > **What is withheld.** Only the **proprietary strategy decision rules** — what ACOS and
 > PAF actually test for (decision-tree branches, entry/exit criteria, strike selection,
 > scoring and thresholds) and the ML feature definitions — are omitted. The *workflow and
 > structure* are shown in full; only the *rules inside each stage* are private.
+
+---
+
+## 0. Source repositories & branches
+
+The work lives in **two separate private repositories**. The current platform is a
+**single repository with multiple branches**; the earlier generation is a separate
+repository. Latest is determined by commit date.
+
+**Current platform — a single repo, multiple branches**
+```
+repo: github.com/phegde211/ai-tradebot-pro        (private)
+   branches:
+     main         2026-07-15   (obsolete)
+     redesign-1   2026-07-19   (obsolete)
+     redesign-2   2026-07-20   (obsolete)
+     redesign-3   2026-07-26   (obsolete)
+     redesign-4   2026-08-15   (LATEST — reviewed; this document describes it)
+```
+
+**Earlier generation — a separate repo, single branch**
+```
+repo: github.com/phegde211/AI_tradebot            (private)
+   branches:
+     main         2026-05-05   (obsolete — earlier TradingView/Playwright paper-trading bridge)
+```
+
+Access to either is by request (contact above). This document describes
+`ai-tradebot-pro @ redesign-4`.
 
 ---
 
@@ -57,6 +87,47 @@ can crash and be restarted without corrupting the others.
 | **FEED** (`FEED_GATEWAY`) | Broker auth and all Dhan I/O: ticks, candles, dynamic option chains, history hydration, held-contract marks. | Run strategy, risk or position code. |
 | **TRADER** | Every decision in one interpreter: ROT scout, strategies, analytics, position management, execution. | Shard itself across processes. |
 | **DASHBOARD** | Read-only presentation + explicit operator commands. | Create a trading fact. |
+
+### End-to-end flow — how a tick becomes a trade
+
+```mermaid
+flowchart TD
+  DHAN["Dhan broker — WebSocket + REST"]
+
+  subgraph FEEDP["FEED process (broker I/O)"]
+    FEED["Feed gateway<br/>spot ticks · candles · option chains"]
+  end
+
+  subgraph TRADERP["TRADER process (one interpreter)"]
+    R1["RING 1 — price only<br/>ROT outer watch (whole universe)<br/>then inner structure on promoted few"]
+    BOARD["Candidate board<br/>sequenced · condition-variable doorbell"]
+    STRAT["Strategies as plug-ins<br/>ACOS · PAF"]
+    R2["RING 2 — activate option chain<br/>ATM±3 / ATM±6 · CE+PE (promoted names only)"]
+    ML["ML admission gate<br/>XGBoost · per-stock calibrated"]
+    POS["PositionService<br/>sizing · capital & risk limits"]
+    EXE["Execution adapter<br/>idempotent · paper/live"]
+    STATE["Ledger + snapshots<br/>JSONL/SQLite · marks · recovery"]
+  end
+
+  subgraph DASHP["DASHBOARD process"]
+    DASH["React UI (read-only)<br/>+ operator commands"]
+  end
+
+  CM["CENTRAL_MANAGER<br/>supervisor"]
+
+  DHAN -->|spot ticks| FEED
+  FEED -->|feed_raw| R1 --> BOARD --> STRAT
+  STRAT -->|identify| R2
+  R2 -.activation request.-> FEED
+  FEED -.option chain.-> R2
+  R2 --> ML --> POS --> EXE -->|orders| DHAN
+  EXE --> STATE
+  POS -->|display state| DASH
+  DASH -->|user commands| POS
+  CM -.supervises.-> FEEDP
+  CM -.supervises.-> TRADERP
+  CM -.supervises.-> DASHP
+```
 
 Only **FEED** and **TRADER** sit on the market-to-order path.
 
@@ -293,12 +364,13 @@ promotion/expiry times and a sequence number.
 
 ---
 
-## 8. Modularity — strategies are plug-ins (the MVP)
+## 8. Modularity — strategies are plug-ins (the engineering MVP)
 
-The defining property of the architecture is **modularity: the strategy layer is fully
-pluggable.** Everything around a strategy — FEED, the ROT scout, the candidate board, the
-ML admission gate, the PositionService and the execution adapter — is a **strategy-agnostic
-spine.** A strategy is a component that plugs into that spine through one uniform contract:
+The defining *engineering* property of the architecture is **modularity: the strategy
+layer is fully pluggable.** Everything around a strategy — FEED, the ROT scout, the
+candidate board, the ML admission gate, the PositionService and the execution adapter — is
+a **strategy-agnostic spine.** A strategy is a component that plugs into that spine through
+one uniform contract:
 
 - it **subscribes to the candidate board** on its own independent cursor, so adding or
   removing one never disturbs the others (invariant 5);
@@ -334,11 +406,18 @@ what makes this a strategy *platform*, not one hard-coded bot.
 
 ---
 
-## 9. Inside a strategy — the decision workflow (stages shown, rules private)
+## 9. The two strategies — 20 years of trading, distilled (the proprietary core)
 
-To show the *shape* of the sophistication without the proprietary rules, here is the
-workflow a candidate travels. The **stages and their ordering are shown; the criteria,
-branches and thresholds inside each stage are private.**
+Everything above is the *platform*. This section is the *edge*. **ACOS** (Adaptive
+Cumulative Option Strategy) and **PAF** (Price Action Follow-up) are the distillation of
+**20+ years of the author's hands-on market experience, codified into two strategies.**
+They are the single most valuable — and most proprietary — part of the system. The modular
+spine (§8) exists precisely so this hard-won logic can be expressed, protected, tested and
+evolved as clean plug-ins instead of being tangled through the engine; the platform serves
+the strategies, not the other way round.
+
+What can be shown is the *shape* of their decision workflow. **The stages and their
+ordering are shown; the criteria, branches and thresholds inside each stage are private.**
 
 ```
   candidate (from ROT board)
@@ -502,4 +581,5 @@ deterministically for replay because it is one graph in one place (§12).
 
 *This is an architecture and technology overview. The ACOS and PAF strategy rules, decision-tree
 and ML feature definitions, datasets and operational configuration are proprietary and remain in
-the private repository. For access or an interview walkthrough, contact Prabhat Hegde.*
+the private repository. To purchase or associate, contact Prabhat Hegde
+([prabhat.hegde@gmail.com](mailto:prabhat.hegde@gmail.com)).*
