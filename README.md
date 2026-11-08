@@ -2,12 +2,12 @@
 
 Public **architecture documents** for two independently built systems. The source code for
 both is **private** — these documents exist so the design can be reviewed without exposing
-the implementation. To request access, **to purchase or associate**, contact Prabhat Hegde
+the implementation. To request access, contact Prabhat Hegde
 ([prabhat.hegde@gmail.com](mailto:prabhat.hegde@gmail.com)).
 
 | Project | What it is | Full architecture |
 |---|---|---|
-| **Octopus** | Transparent, asynchronous TLS-terminating interception proxy — C | [Octopus_architecture.md](Octopus_architecture.md) |
+| **Octopus** | Transparent, asynchronous network interception proxy (TLS support) — C | [Octopus_architecture.md](Octopus_architecture.md) |
 | **AI Tradebot Pro** | Event-driven intraday options-trading platform — Python | [AI_tradebot_architecture.md](AI_tradebot_architecture.md) |
 
 ---
